@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives import hashes
 
 from .certificates import PEM_PATTERN
 from .models import Certificate, Jvm, Result
+from .process import run_silent
 
 
 class StoreError(RuntimeError):
@@ -22,7 +23,7 @@ def _keytool(jvm: Jvm, password: str, *args: str) -> subprocess.CompletedProcess
     env["JVMCERT_STOREPASS"] = password
     command = [str(jvm.keytool), *args, "-keystore", str(jvm.cacerts), "-storepass:env", "JVMCERT_STOREPASS"]
     try:
-        return subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=45)
+        return run_silent(command, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=45)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise StoreError(f"Falha ao executar keytool: {exc}") from exc
 

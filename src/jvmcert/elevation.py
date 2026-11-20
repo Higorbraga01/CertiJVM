@@ -12,6 +12,7 @@ from pathlib import Path
 from .certificates import _certificate
 from .discovery import inspect_jvm
 from .models import Certificate, Jvm, Result
+from .process import run_silent
 from .store import mutate
 
 
@@ -26,7 +27,7 @@ def run_elevated_batch(jobs: list[tuple[Jvm, str, str, Certificate | None, bool]
         root = Path(directory)
         if os.name == "nt":
             # A standard user may authenticate UAC with a different admin account.
-            subprocess.run(["icacls", str(root), "/grant", "*S-1-5-32-544:(OI)(CI)F"], capture_output=True, check=True)
+            run_silent(["icacls", str(root), "/grant", "*S-1-5-32-544:(OI)(CI)F"], capture_output=True, check=True)
         request, response = root / "request.json", root / "response.json"
         payload = {"password": password, "response": str(response), "jobs": [
             {"home": str(jvm.home), "alias": alias, "operation": operation,
@@ -42,9 +43,9 @@ def run_elevated_batch(jobs: list[tuple[Jvm, str, str, Certificate | None, bool]
             quote = lambda value: "'" + value.replace("'", "''") + "'"
             arguments = " ".join('"' + value.replace('"', '\\"') + '"' for value in command[1:])
             script = "$p = Start-Process -FilePath " + quote(command[0]) + " -ArgumentList " + quote(arguments) + " -Verb RunAs -Wait -PassThru -WindowStyle Hidden; exit $p.ExitCode"
-            process = subprocess.run(["powershell.exe", "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=600)
+            process = run_silent(["powershell.exe", "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=600)
         else:
-            process = subprocess.run(["pkexec", *command], capture_output=True, text=True, timeout=600)
+            process = run_silent(["pkexec", *command], capture_output=True, text=True, timeout=600)
         try:
             answer = json.loads(response.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:

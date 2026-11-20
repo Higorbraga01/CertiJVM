@@ -5,8 +5,10 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from collections.abc import Callable, Iterable
 
 from .models import Jvm
+from .process import run_silent
 
 
 def _candidate_homes() -> set[Path]:
@@ -61,7 +63,7 @@ def inspect_jvm(home: Path) -> Jvm:
         cacerts = base / "lib" / "security" / "cacerts"
         if java.is_file() and keytool.is_file() and cacerts.is_file():
             try:
-                run = subprocess.run([str(java), "-version"], capture_output=True, text=True, timeout=8)
+                run = run_silent([str(java), "-version"], capture_output=True, text=True, timeout=8)
                 version = (run.stderr or run.stdout).splitlines()[0]
                 match = re.search(r'version "(?:1\.)?(\d+)', version)
                 if match and int(match.group(1)) < 8:
@@ -77,12 +79,19 @@ def inspect_jvm(home: Path) -> Jvm:
     raise ValueError(f"JVM com java, keytool e cacerts não encontrada em {home}")
 
 
-def discover_jvms() -> list[Jvm]:
+def discover_jvms(progress: Callable[[int, int, str], None] | None = None, cancelled: Callable[[], bool] | None = None, extra_homes: Iterable[Path] = ()) -> list[Jvm]:
     found: dict[Path, Jvm] = {}
-    for home in _candidate_homes():
+    candidates = sorted(_candidate_homes() | set(extra_homes), key=lambda path: str(path).lower())
+    for index, home in enumerate(candidates, start=1):
+        if cancelled and cancelled():
+            break
+        if progress:
+            progress(index - 1, len(candidates), f"Verificando {home}")
         try:
             jvm = inspect_jvm(home)
             found[jvm.cacerts] = jvm
         except (ValueError, OSError):
             continue
+    if progress:
+        progress(len(candidates), len(candidates), "Busca concluída")
     return sorted(found.values(), key=lambda item: str(item.home).lower())

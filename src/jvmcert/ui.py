@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from threading import Event
 from urllib.parse import urlparse
 
 from PySide6.QtCore import QObject, QThread, Signal, Qt
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QFileDialog, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QTabWidget, QComboBox,
+    QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QTabWidget, QComboBox, QProgressBar,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -21,23 +22,28 @@ from .tls import test_tls
 
 
 class Worker(QObject):
-    done = Signal(object, object)
+    done = Signal(object, object, bool)
+    progress = Signal(int, int, str)
 
     def __init__(self, function):
         super().__init__()
         self.function = function
+        self.cancelled = Event()
+
+    def report(self, done: int, total: int, message: str):
+        self.progress.emit(done, total, message)
 
     def run(self):
         try:
-            self.done.emit(self.function(), None)
+            self.done.emit(self.function(self.report, self.cancelled.is_set), None, self.cancelled.is_set())
         except Exception as exc:
-            self.done.emit(None, str(exc))
+            self.done.emit(None, str(exc), self.cancelled.is_set())
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Certificados JVM")
+        self.setWindowTitle("CertiJVM — Certificados Java")
         self.resize(1260, 780)
         self.config = load_config()
         self.jvms: list[Jvm] = []
@@ -46,33 +52,50 @@ class MainWindow(QMainWindow):
         self.operation = "install"
         self._threads: list[QThread] = []
         self._workers: list[Worker] = []
+        self._active_worker: Worker | None = None
+        self._actions: list[QPushButton] = []
         self._build()
-        self.refresh_jvms()
+        self.statusBar().showMessage("Clique em Buscar JVMs para iniciar a descoberta")
         self._load_saved_files()
 
     def _build(self):
         central = QWidget()
         self.setCentralWidget(central)
         main = QVBoxLayout(central)
-        title = QLabel("Gerenciador de certificados JVM")
+        title = QLabel("CertiJVM")
         title.setObjectName("title")
         main.addWidget(title)
         main.addWidget(QLabel("Selecione JVMs e certificados, revise cada alteração e execute com conferência automática."))
+        progress_row = QHBoxLayout()
+        self.progress_label = QLabel()
+        progress_row.addWidget(self.progress_label, 1)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setTextVisible(True)
+        progress_row.addWidget(self.progress_bar, 1)
+        self.cancel_button = QPushButton("Cancelar busca")
+        self.cancel_button.clicked.connect(self.cancel_search)
+        progress_row.addWidget(self.cancel_button)
+        self.progress_panel = QWidget()
+        self.progress_panel.setLayout(progress_row)
+        self.progress_panel.hide()
+        main.addWidget(self.progress_panel)
         self.tabs = QTabWidget()
         main.addWidget(self.tabs)
         self.statusBar().showMessage("Pronto")
 
         jvm_page = QWidget(); jvm_layout = QVBoxLayout(jvm_page)
-        jvm_layout.addWidget(QLabel("Instalações Java encontradas neste computador"))
+        jvm_layout.addWidget(QLabel("A descoberta começa somente após você clicar em Buscar JVMs."))
         self.jvm_table = self._table(["Selecionar", "Versão", "JVM", "cacerts", "Gravação"])
         jvm_layout.addWidget(self.jvm_table)
         row = QHBoxLayout()
-        self.refresh_button = QPushButton("Buscar JVMs novamente")
+        self.refresh_button = QPushButton("Buscar JVMs")
         self.refresh_button.clicked.connect(self.refresh_jvms)
         row.addWidget(self.refresh_button)
+        self._actions.append(self.refresh_button)
         manual = QPushButton("Adicionar JVM manualmente")
         manual.clicked.connect(self.add_jvm)
         row.addWidget(manual); row.addStretch()
+        self._actions.append(manual)
         jvm_layout.addLayout(row)
         self.tabs.addTab(jvm_page, "1. JVMs")
 
@@ -81,20 +104,24 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         add_files = QPushButton("Escolher arquivos…"); add_files.clicked.connect(self.add_files)
         row.addWidget(add_files)
+        self._actions.append(add_files)
         self.url_input = QComboBox(); self.url_input.setEditable(True)
         self.url_input.addItems(self.config["urls"])
         self.url_input.lineEdit().setPlaceholderText("https://servidor.exemplo/caminho ou https://servidor/certificado.crt")
         row.addWidget(self.url_input, 1)
         fetch = QPushButton("Buscar URL"); fetch.clicked.connect(self.fetch_url)
         row.addWidget(fetch)
+        self._actions.append(fetch)
         forget = QPushButton("Excluir URL"); forget.clicked.connect(self.forget_url)
         row.addWidget(forget)
+        self._actions.append(forget)
         cert_layout.addLayout(row)
         self.cert_table = self._table(["Selecionar", "Alias (editável)", "Origem", "Assunto", "Emissor", "Válido de", "Válido até", "SHA-256", "URL de teste (editável)"])
         cert_layout.addWidget(self.cert_table)
         row = QHBoxLayout()
         remove = QPushButton("Remover itens da lista"); remove.clicked.connect(self.remove_items)
         row.addWidget(remove)
+        self._actions.append(remove)
         row.addWidget(QLabel("Certificados inválidos podem ser selecionados apenas para remoção.")); row.addStretch()
         cert_layout.addLayout(row)
         self.tabs.addTab(cert_page, "2. Certificados")
@@ -108,14 +135,17 @@ class MainWindow(QMainWindow):
         row.addWidget(self.remove_alias)
         prepare_install = QPushButton("Revisar adição / atualização"); prepare_install.clicked.connect(lambda: self.prepare("install"))
         row.addWidget(prepare_install)
+        self._actions.append(prepare_install)
         prepare_remove = QPushButton("Revisar remoção"); prepare_remove.clicked.connect(lambda: self.prepare("remove"))
         row.addWidget(prepare_remove)
+        self._actions.append(prepare_remove)
         review_layout.addLayout(row)
         self.review_table = self._table(["JVM", "Alias", "Operação", "Estado atual", "Novo estado"])
         review_layout.addWidget(self.review_table)
         self.run_button = QPushButton("Executar alterações revisadas")
         self.run_button.setEnabled(False); self.run_button.clicked.connect(self.execute)
         review_layout.addWidget(self.run_button)
+        self._actions.append(self.run_button)
         self.tabs.addTab(review_page, "3. Revisão")
 
         result_page = QWidget(); result_layout = QVBoxLayout(result_page)
@@ -160,12 +190,15 @@ class MainWindow(QMainWindow):
         item.setToolTip(text)
         return item
 
-    def _background(self, function, callback):
+    def _background(self, message: str, function, callback, cancellable: bool = False):
+        if self._active_worker is not None:
+            return
         thread = QThread(self)
         worker = Worker(function)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.done.connect(callback)
+        worker.done.connect(lambda result, error, cancelled: self._task_done(worker, callback, result, error, cancelled))
+        worker.progress.connect(self._task_progress)
         worker.done.connect(thread.quit, Qt.ConnectionType.DirectConnection)
         worker.done.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
@@ -173,7 +206,45 @@ class MainWindow(QMainWindow):
         thread.finished.connect(lambda: self._workers.remove(worker) if worker in self._workers else None)
         self._threads.append(thread)
         self._workers.append(worker)
+        self._active_worker = worker
+        self.progress_label.setText(message)
+        self.progress_bar.setRange(0, 0)
+        self.cancel_button.setVisible(cancellable)
+        self.cancel_button.setEnabled(cancellable)
+        self.progress_panel.show()
+        for button in self._actions:
+            button.setEnabled(False)
+        self.statusBar().showMessage(message)
         thread.start()
+
+    def _task_progress(self, done: int, total: int, message: str):
+        if self._active_worker is None or self._active_worker.cancelled.is_set():
+            return
+        self.progress_label.setText(message)
+        self.progress_bar.setRange(0, total if total > 0 else 0)
+        if total > 0:
+            self.progress_bar.setValue(done)
+        self.statusBar().showMessage(message)
+
+    def _task_done(self, worker: Worker, callback, result, error, cancelled: bool):
+        if worker is not self._active_worker:
+            return
+        self._active_worker = None
+        self.progress_panel.hide()
+        for button in self._actions:
+            button.setEnabled(True)
+        self.run_button.setEnabled(bool(self.plan))
+        if cancelled:
+            self.statusBar().showMessage("Busca cancelada")
+        else:
+            callback(result, error)
+
+    def cancel_search(self):
+        if self._active_worker is not None:
+            self._active_worker.cancelled.set()
+            self.cancel_button.setEnabled(False)
+            self.progress_label.setText("Cancelando busca…")
+            self.statusBar().showMessage("Cancelando busca…")
 
     def closeEvent(self, event):
         for thread in list(self._threads):
@@ -185,66 +256,110 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def refresh_jvms(self):
-        self.statusBar().showMessage("Buscando JVMs…")
-        self._background(discover_jvms, self._jvms_ready)
+        manual_homes = [Path(path) for path in self.config["manual_jvms"]]
+        self._background(
+            "Buscando JVMs…",
+            lambda report, cancelled: discover_jvms(progress=report, cancelled=cancelled, extra_homes=manual_homes),
+            self._jvms_ready,
+            cancellable=True,
+        )
 
     def _jvms_ready(self, found, error):
         if error:
             self._error(error); return
         selected = {str(self.jvms[i].cacerts) for i in range(len(self.jvms)) if i < self.jvm_table.rowCount() and self.jvm_table.item(i, 0).checkState() == Qt.CheckState.Checked}
-        by_store = {str(j.cacerts): j for j in found}
-        for path in self.config["manual_jvms"]:
-            try:
-                jvm = inspect_jvm(Path(path)); by_store[str(jvm.cacerts)] = jvm
-            except (OSError, ValueError):
-                pass
-        self.jvms = list(by_store.values())
+        self.jvms = found
+        self._render_jvms(selected)
+        self.statusBar().showMessage(f"{len(self.jvms)} JVM(s) encontrada(s)")
+
+    def _render_jvms(self, selected: set[str]):
         self.jvm_table.setRowCount(len(self.jvms))
         for i, jvm in enumerate(self.jvms):
             values = ["", jvm.version, str(jvm.home), str(jvm.cacerts), "Direta" if jvm.writable else "Elevação necessária"]
             for col, value in enumerate(values):
                 self.jvm_table.setItem(i, col, self._item(value, checked=str(jvm.cacerts) in selected if col == 0 else None))
-        self.statusBar().showMessage(f"{len(self.jvms)} JVM(s) encontrada(s)")
 
     def add_jvm(self):
         path = QFileDialog.getExistingDirectory(self, "Selecione a pasta da JDK/JRE")
         if not path:
             return
-        try:
-            jvm = inspect_jvm(Path(path))
-        except (OSError, ValueError) as exc:
-            self._error(str(exc)); return
+        self._background("Verificando JVM selecionada…", lambda report, cancelled: inspect_jvm(Path(path)), self._manual_jvm_ready)
+
+    def _manual_jvm_ready(self, jvm, error):
+        if error:
+            self._error(error); return
         if str(jvm.home) not in self.config["manual_jvms"]:
             self.config["manual_jvms"].append(str(jvm.home)); save_config(self.config)
-        self._jvms_ready(self.jvms, None)
-        for i, item in enumerate(self.jvms):
-            if item.cacerts == jvm.cacerts:
-                self.jvm_table.item(i, 0).setCheckState(Qt.CheckState.Checked)
+        selected = {str(self.jvms[i].cacerts) for i in range(len(self.jvms)) if self.jvm_table.item(i, 0).checkState() == Qt.CheckState.Checked}
+        selected.add(str(jvm.cacerts))
+        by_store = {str(item.cacerts): item for item in self.jvms}
+        by_store[str(jvm.cacerts)] = jvm
+        self.jvms = list(by_store.values())
+        self._render_jvms(selected)
+        self.statusBar().showMessage("JVM adicionada manualmente")
 
     def _load_saved_files(self):
-        for path in self.config["files"]:
-            try:
-                self._append_certs(load_file(Path(path)))
-            except Exception:
-                continue
+        paths = list(self.config["files"])
+        if not paths:
+            return
+        def work(report, cancelled):
+            certificates = []
+            for index, path in enumerate(paths, start=1):
+                report(index - 1, len(paths), f"Lendo certificado salvo {index}/{len(paths)}")
+                try:
+                    certificates.extend(load_file(Path(path)))
+                except Exception:
+                    continue
+            report(len(paths), len(paths), "Certificados salvos carregados")
+            return certificates
+        self._background("Carregando certificados salvos…", work, self._saved_files_ready)
+
+    def _saved_files_ready(self, certs, error):
+        if error:
+            self._error(error); return
+        self._append_certs(certs)
+        self.statusBar().showMessage(f"{len(certs)} certificado(s) salvo(s) carregado(s)")
 
     def add_files(self):
         paths, _ = QFileDialog.getOpenFileNames(self, "Selecione certificados", "", "Certificados (*.crt *.cer *.pem)")
-        for path in paths:
-            try:
-                self._append_certs(load_file(Path(path)))
-                if path not in self.config["files"]:
-                    self.config["files"].append(path)
-            except Exception as exc:
-                self._error(f"{path}: {exc}")
+        if not paths:
+            return
+        def work(report, cancelled):
+            certificates, loaded, errors = [], [], []
+            for index, path in enumerate(paths, start=1):
+                report(index - 1, len(paths), f"Lendo arquivo {index}/{len(paths)}")
+                try:
+                    certificates.extend(load_file(Path(path)))
+                    loaded.append(path)
+                except Exception as exc:
+                    errors.append(f"{path}: {exc}")
+            report(len(paths), len(paths), "Leitura de arquivos concluída")
+            return certificates, loaded, errors
+        self._background("Lendo certificados selecionados…", work, self._files_ready)
+
+    def _files_ready(self, result, error):
+        if error:
+            self._error(error); return
+        certs, loaded, errors = result
+        self._append_certs(certs)
+        for path in loaded:
+            if path not in self.config["files"]:
+                self.config["files"].append(path)
         save_config(self.config)
+        self.statusBar().showMessage(f"{len(certs)} certificado(s) lido(s)")
+        if errors:
+            self._error("\n".join(errors))
 
     def fetch_url(self):
         url = self.url_input.currentText().strip()
         if not url:
             return
-        self.statusBar().showMessage("Obtendo certificados da URL…")
-        self._background(lambda: load_url(url), lambda certs, error: self._url_ready(url, certs, error))
+        self._background(
+            "Obtendo certificados da URL…",
+            lambda report, cancelled: load_url(url, cancelled=cancelled),
+            lambda certs, error: self._url_ready(url, certs, error),
+            cancellable=True,
+        )
 
     def _url_ready(self, url, certs, error):
         if error:
@@ -322,12 +437,20 @@ class MainWindow(QMainWindow):
             self._error("Certificados vencidos ou ainda não válidos não podem ser importados."); return
         if operation == "install" and any(c.test_url and (urlparse(c.test_url).scheme != "https" or not urlparse(c.test_url).hostname) for c in certs):
             self._error("As URLs de teste devem começar com https:// e informar um servidor."); return
+        self.plan = []
+        self.review_table.setRowCount(0)
+        self.run_button.setEnabled(False)
         self.operation = operation
         password = self.password.text()
-        self.statusBar().showMessage("Conferindo entradas existentes…")
-        def work():
-            return [(j, c, entry_fingerprint(j, c.alias, password)) for j in jvms for c in certs]
-        self._background(work, self._review_ready)
+        def work(report, cancelled):
+            pairs = [(j, c) for j in jvms for c in certs]
+            rows = []
+            for index, (jvm, cert) in enumerate(pairs, start=1):
+                report(index - 1, len(pairs), f"Conferindo {cert.alias} em {jvm.home} ({index}/{len(pairs)})")
+                rows.append((jvm, cert, entry_fingerprint(jvm, cert.alias, password)))
+            report(len(pairs), len(pairs), "Revisão concluída")
+            return rows
+        self._background("Conferindo entradas existentes…", work, self._review_ready)
 
     def _review_ready(self, rows, error):
         if error:
@@ -356,13 +479,14 @@ class MainWindow(QMainWindow):
             return
         plan = list(self.plan); operation = self.operation; password = self.password.text()
         self.run_button.setEnabled(False)
-        self.statusBar().showMessage("Aplicando alterações e testando…")
-        def work():
+        def work(report, cancelled):
             results: list[Result | None] = [None] * len(plan)
             protected = [(i, jvm, cert, action) for i, (jvm, cert, _, action) in enumerate(plan) if not jvm.writable]
             if protected:
+                report(0, 0, "Solicitando permissão do sistema para JVMs protegidas…")
                 try:
                     jobs = [(jvm, cert.alias, operation, cert if operation == "install" else None, action == "Substituir") for _, jvm, cert, action in protected]
+                    report(0, 0, "Aplicando alterações nas JVMs protegidas…")
                     elevated = run_elevated_batch(jobs, password)
                     for (i, _, _, _), item in zip(protected, elevated):
                         results[i] = item
@@ -370,6 +494,7 @@ class MainWindow(QMainWindow):
                     for i, jvm, cert, _ in protected:
                         results[i] = Result(str(jvm.home), cert.alias, operation, "falha", str(exc))
             for i, (jvm, cert, _, action) in enumerate(plan):
+                report(i, len(plan), f"Processando {cert.alias} em {jvm.home} ({i + 1}/{len(plan)})")
                 if results[i] is None:
                     try:
                         results[i] = mutate(jvm, cert.alias, password, operation, cert if operation == "install" else None, action == "Substituir")
@@ -382,8 +507,9 @@ class MainWindow(QMainWindow):
                         results[i] = Result(result.jvm, result.alias, result.operation, "sucesso" if ok else "TLS falhou", result.detail + " Teste Java: " + detail)
                     else:
                         results[i] = Result(result.jvm, result.alias, result.operation, result.status, result.detail + " Sem URL: verificação do truststore apenas.")
+                report(i + 1, len(plan), f"Concluído {i + 1}/{len(plan)}")
             return results
-        self._background(work, self._results_ready)
+        self._background("Aplicando alterações e testando…", work, self._results_ready)
 
     def _results_ready(self, results, error):
         self.run_button.setEnabled(True)
@@ -399,4 +525,4 @@ class MainWindow(QMainWindow):
 
     def _error(self, message: str):
         self.statusBar().showMessage("Erro")
-        QMessageBox.warning(self, "Certificados JVM", message)
+        QMessageBox.warning(self, "CertiJVM", message)

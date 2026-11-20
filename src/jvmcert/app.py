@@ -17,7 +17,7 @@ def main() -> int:
     from .ui import MainWindow
 
     app = QApplication(sys.argv)
-    app.setApplicationName("Certificados JVM")
+    app.setApplicationName("CertiJVM")
     window = MainWindow()
     window.show()
     return app.exec()

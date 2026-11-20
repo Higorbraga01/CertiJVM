@@ -6,6 +6,7 @@ import select
 import socket
 import ssl
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -50,7 +51,9 @@ def load_file(path: Path) -> list[Certificate]:
     return parse_certificates(path.read_bytes(), str(path.resolve()))
 
 
-def load_url(url: str) -> list[Certificate]:
+def load_url(url: str, cancelled: Callable[[], bool] | None = None) -> list[Certificate]:
+    if cancelled and cancelled():
+        raise RuntimeError("Busca cancelada")
     parsed = urlparse(url)
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
         raise ValueError("Informe uma URL HTTPS válida, sem credenciais")
@@ -62,9 +65,19 @@ def load_url(url: str) -> list[Certificate]:
         with urlopen(Request(url, headers={"User-Agent": "JVM-Cert-Manager/0.1"}), timeout=15, context=context) as response:
             if urlparse(response.geturl()).scheme != "https":
                 raise ValueError("Redirecionamento para endereço não HTTPS recusado")
-            data = response.read(2_000_001)
-        if len(data) > 2_000_000:
-            raise ValueError("O arquivo de certificado excede 2 MB")
+            chunks = []
+            size = 0
+            while True:
+                if cancelled and cancelled():
+                    raise RuntimeError("Busca cancelada")
+                chunk = response.read(min(65_536, 2_000_001 - size))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                size += len(chunk)
+                if size > 2_000_000:
+                    raise ValueError("O arquivo de certificado excede 2 MB")
+            data = b"".join(chunks)
         return parse_certificates(data, url)
     raw = socket.create_connection((parsed.hostname, parsed.port or 443), timeout=15)
     connection = SSL.Connection(SSL.Context(SSL.TLS_CLIENT_METHOD), raw)
@@ -73,6 +86,8 @@ def load_url(url: str) -> list[Certificate]:
         connection.set_connect_state()
         deadline = time.monotonic() + 15
         while True:
+            if cancelled and cancelled():
+                raise RuntimeError("Busca cancelada")
             try:
                 connection.do_handshake()
                 break
@@ -81,9 +96,9 @@ def load_url(url: str) -> list[Certificate]:
                 if remaining <= 0:
                     raise TimeoutError("Tempo esgotado durante o handshake TLS") from pending
                 if isinstance(pending, SSL.WantReadError):
-                    select.select([raw], [], [], remaining)
+                    select.select([raw], [], [], min(0.2, remaining))
                 else:
-                    select.select([], [raw], [], remaining)
+                    select.select([], [raw], [], min(0.2, remaining))
         chain = connection.get_peer_cert_chain() or []
         if not chain:
             raise ValueError("O servidor não apresentou certificados")

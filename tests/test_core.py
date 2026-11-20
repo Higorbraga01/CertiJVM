@@ -165,6 +165,11 @@ def test_unreachable_url():
         load_url("https://127.0.0.1:1/unreachable")
 
 
+def test_cancelled_url_never_connects():
+    with pytest.raises(RuntimeError, match="cancelada"):
+        load_url("https://127.0.0.1:1/unreachable", cancelled=lambda: True)
+
+
 def test_privileged_batch_reports_independent_results(test_jvm, tmp_path, monkeypatch):
     import jvmcert.elevation as elevation
 
