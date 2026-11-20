@@ -3,6 +3,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main, master]
+    tags: ['v*']
 
 jobs:
   build:
@@ -37,3 +38,27 @@ jobs:
         with:
           name: CertiJVM-${{ matrix.os }}
           path: dist/CertiJVM-*.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: CertiJVM-*
+          path: release-dist
+          merge-multiple: true
+      - name: Publicar pacotes da versao
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          test -f release-dist/CertiJVM-Windows.zip
+          test -f release-dist/CertiJVM-Linux.zip
+          gh release create "$GITHUB_REF_NAME" \
+            release-dist/CertiJVM-Windows.zip \
+            release-dist/CertiJVM-Linux.zip \
+            --verify-tag --generate-notes

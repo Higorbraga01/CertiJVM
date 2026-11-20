@@ -2,6 +2,12 @@
 
 Aplicativo gráfico em português para adicionar, atualizar, remover e conferir certificados no `cacerts` de múltiplas JDKs/JREs Java 8+ no Windows e Ubuntu 22.04+.
 
+## Baixar
+
+Baixe `CertiJVM-Windows.zip` ou `CertiJVM-Linux.zip` na [página de versões](https://github.com/Higorbraga01/CertiJVM/releases). Extraia o ZIP inteiro antes de executar `CertiJVM.exe` no Windows ou `CertiJVM` no Ubuntu. No Ubuntu, instale também `libegl1`.
+
+Cada tag de versão `v*` enviada ao GitHub executa os testes, cria os dois pacotes e os publica em uma Release somente se ambos os builds passarem. A versão do projeto está em `pyproject.toml`.
+
 ## Executar a partir do código
 
 É necessário Python 3.10+, um JDK com `javac` para compilar o módulo de teste Java e acesso às dependências Python.
