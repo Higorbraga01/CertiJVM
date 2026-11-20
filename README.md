@@ -17,12 +17,16 @@ python -m venv .venv
 No Ubuntu:
 
 ```bash
+sudo apt-get update
+sudo apt-get install -y libegl1
 python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
 .venv/bin/python build.py
 ```
 
 Para desenvolvimento, compile `src/jvmcert/java/TlsProbe.java` com `javac --release 8 -d src/jvmcert/java src/jvmcert/java/TlsProbe.java` e execute `python launcher.py`. O pacote portátil fica em `dist/CertiJVM/`, e um ZIP para distribuição em `dist/CertiJVM-Windows.zip` ou `dist/CertiJVM-Linux.zip`. O GitHub Actions gera artefatos separados para Windows e Ubuntu; o pacote precisa ser construído no respectivo sistema operacional.
+
+No Ubuntu, a interface Qt também precisa da biblioteca de sistema `libegl1` ao executar o pacote portátil.
 
 ## Uso
 
